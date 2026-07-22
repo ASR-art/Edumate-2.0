@@ -4,6 +4,8 @@ class TaskManager {
         this.tasks = this.loadFromStorage() || [];
         this.currentFilter = 'all';
         this.taskIdCounter = this.tasks.length > 0 ? Math.max(...this.tasks.map(t => t.id)) + 1 : 1;
+        this.recognition = null;
+        this.isListening = false;
         this.init();
     }
 
@@ -13,6 +15,7 @@ class TaskManager {
         this.setupThemeToggle();
         this.render();
         this.setupReminders();
+        this.requestMicrophonePermission();
     }
 
     // ===== Storage Management =====
@@ -72,6 +75,24 @@ class TaskManager {
         });
     }
 
+    // ===== Microphone Permission Request =====
+    requestMicrophonePermission() {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(stream => {
+                    // Stop the stream immediately - we just needed permission
+                    stream.getTracks().forEach(track => track.stop());
+                    console.log('Microphone permission granted');
+                })
+                .catch(error => {
+                    console.log('Microphone permission denied:', error);
+                    const voiceBtn = document.getElementById('voiceBtn');
+                    voiceBtn.disabled = true;
+                    voiceBtn.title = 'Microphone permission denied. Please enable it in browser settings.';
+                });
+        }
+    }
+
     // ===== Speech Recognition =====
     setupSpeechRecognition() {
         const voiceBtn = document.getElementById('voiceBtn');
@@ -86,52 +107,109 @@ class TaskManager {
             return;
         }
 
-        const recognition = new SpeechRecognition();
-        recognition.continuous = false;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
+        this.recognition = new SpeechRecognition();
+        this.recognition.continuous = false;
+        this.recognition.interimResults = true;
+        this.recognition.lang = 'en-US';
 
-        voiceBtn.addEventListener('click', () => {
-            if (voiceBtn.classList.contains('listening')) {
-                recognition.stop();
+        voiceBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            
+            if (this.isListening) {
+                this.stopListening();
             } else {
-                recognition.start();
-                voiceBtn.classList.add('listening');
-                voiceBtn.textContent = '🎤 Listening...';
-                voiceStatus.textContent = '🔴 Recording...';
-                voiceStatus.classList.add('active');
+                this.startListening();
             }
         });
 
-        recognition.onresult = (event) => {
-            let transcript = '';
-            for (let i = event.resultIndex; i < event.results.length; i++) {
-                transcript += event.results[i][0].transcript;
-            }
-            taskInput.value = transcript.trim();
+        this.recognition.onstart = () => {
+            console.log('Speech recognition started');
+            this.isListening = true;
+            voiceBtn.classList.add('listening');
+            voiceBtn.textContent = '🎤 Listening...';
+            voiceStatus.textContent = '🔴 Recording...';
+            voiceStatus.classList.add('active');
         };
 
-        recognition.onend = () => {
+        this.recognition.onresult = (event) => {
+            let transcript = '';
+            let isFinal = false;
+
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                transcript += event.results[i][0].transcript;
+                if (event.results[i].isFinal) {
+                    isFinal = true;
+                }
+            }
+
+            if (transcript.trim()) {
+                taskInput.value = transcript.trim();
+            }
+
+            // Show interim results
+            if (!isFinal) {
+                voiceStatus.textContent = `🎙️ Transcribing: "${transcript.trim()}"`;
+            }
+        };
+
+        this.recognition.onend = () => {
+            console.log('Speech recognition ended');
+            this.isListening = false;
             voiceBtn.classList.remove('listening');
             voiceBtn.textContent = '🎤 Voice';
-            voiceStatus.textContent = '✅ Transcribed successfully!';
-            voiceStatus.classList.remove('active');
-            voiceStatus.classList.add('success');
+            
+            if (taskInput.value.trim()) {
+                voiceStatus.textContent = '✅ Transcribed successfully!';
+                voiceStatus.classList.remove('active');
+                voiceStatus.classList.add('success');
+            }
+            
             setTimeout(() => {
                 voiceStatus.textContent = '';
                 voiceStatus.classList.remove('success');
             }, 3000);
         };
 
-        recognition.onerror = (event) => {
+        this.recognition.onerror = (event) => {
+            console.error('Speech recognition error:', event.error);
+            this.isListening = false;
             voiceBtn.classList.remove('listening');
             voiceBtn.textContent = '🎤 Voice';
-            voiceStatus.textContent = `❌ Error: ${event.error}`;
+            
+            let errorMessage = event.error;
+            if (event.error === 'no-speech') {
+                errorMessage = 'No speech detected. Please try again.';
+            } else if (event.error === 'network') {
+                errorMessage = 'Network error. Check your connection.';
+            } else if (event.error === 'not-allowed') {
+                errorMessage = 'Microphone permission denied.';
+            }
+            
+            voiceStatus.textContent = `❌ Error: ${errorMessage}`;
             voiceStatus.classList.remove('active');
+            
             setTimeout(() => {
                 voiceStatus.textContent = '';
-            }, 3000);
+            }, 5000);
         };
+    }
+
+    startListening() {
+        if (this.recognition && !this.isListening) {
+            try {
+                this.recognition.start();
+            } catch (error) {
+                console.error('Error starting speech recognition:', error);
+                const voiceStatus = document.getElementById('voiceStatus');
+                voiceStatus.textContent = '❌ Error starting voice input';
+            }
+        }
+    }
+
+    stopListening() {
+        if (this.recognition && this.isListening) {
+            this.recognition.stop();
+        }
     }
 
     // ===== Task Management =====
@@ -321,21 +399,25 @@ class TaskManager {
 
     playAudio() {
         // Simple beep using Web Audio API
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const oscillator = audioContext.createOscillator();
-        const gain = audioContext.createGain();
-        
-        oscillator.connect(gain);
-        gain.connect(audioContext.destination);
-        
-        oscillator.frequency.value = 800;
-        oscillator.type = 'sine';
-        
-        gain.gain.setValueAtTime(0.3, audioContext.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-        
-        oscillator.start(audioContext.currentTime);
-        oscillator.stop(audioContext.currentTime + 0.5);
+        try {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+            
+            oscillator.connect(gain);
+            gain.connect(audioContext.destination);
+            
+            oscillator.frequency.value = 800;
+            oscillator.type = 'sine';
+            
+            gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+            
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.5);
+        } catch (error) {
+            console.error('Error playing audio:', error);
+        }
     }
 
     // ===== Notifications =====
